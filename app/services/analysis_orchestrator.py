@@ -181,21 +181,7 @@ class AnalysisOrchestrator:
             case.results = [result]
             return
 
-        persisted_scorecards = sorted(
-            [
-                scorecard
-                for scorecard in non_normal_scorecards
-                if scorecard.total_score >= self.settings.min_persisted_score
-            ],
-            key=lambda card: card.total_score,
-            reverse=True,
-        )[: self.settings.max_persisted_non_normal]
-        if not persisted_scorecards and non_normal_scorecards:
-            persisted_scorecards = sorted(
-                non_normal_scorecards,
-                key=lambda card: card.total_score,
-                reverse=True,
-            )[:1]
+        persisted_scorecards = self.select_persisted_scorecards(non_normal_scorecards)
 
         case.results = []
         for rank_position, scorecard in enumerate(persisted_scorecards, start=1):
@@ -229,6 +215,27 @@ class AnalysisOrchestrator:
             for scorecard in non_normal_scorecards
         )
         return not has_pathology and not has_strong_pattern
+
+    def select_persisted_scorecards(
+        self,
+        non_normal_scorecards: list[DiseaseScoreCard],
+    ) -> list[DiseaseScoreCard]:
+        persisted_scorecards = sorted(
+            [
+                scorecard
+                for scorecard in non_normal_scorecards
+                if scorecard.total_score >= self.settings.min_persisted_score
+            ],
+            key=lambda card: card.total_score,
+            reverse=True,
+        )[: self.settings.max_persisted_non_normal]
+        if not persisted_scorecards and non_normal_scorecards:
+            persisted_scorecards = sorted(
+                non_normal_scorecards,
+                key=lambda card: card.total_score,
+                reverse=True,
+            )[:1]
+        return persisted_scorecards
 
     def _serialize_case(self, case: AnalysisCase) -> AnalysisResponse:
         top_results = sorted(case.results, key=lambda item: item.rank_position)[

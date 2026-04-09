@@ -1,0 +1,2 @@
+"""Synthetic case generation helpers."""
+

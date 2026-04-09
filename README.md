@@ -24,6 +24,7 @@ This project is a clinical decision-support prototype. It does not provide a def
   - `AnalysisOrchestrator`
 - `app/repositories` keeps route handlers thin and centralizes common persistence queries.
 - `app/seed/seed_data.py` populates indicators, diseases, reference ranges, rules, and patterns.
+- `app/ml` contains the synthetic dataset generation and ML training pipeline built on top of the existing rule-based engine.
 - `pytest` covers unit logic and integration flows against PostgreSQL.
 
 ## Database Overview
@@ -240,6 +241,54 @@ make test
 ```
 
 The test suite resets the PostgreSQL test schema, runs Alembic migrations, seeds demo data, and then executes both unit and integration tests.
+
+## Synthetic Dataset and ML Pipeline
+
+The project also includes a synthetic dataset generation and ML training pipeline for educational prototyping. It does not use real clinical cases.
+
+- Synthetic cases are generated from the existing sex- and age-aware reference ranges.
+- The existing backend services are reused for deviation interpretation, rule scoring, and pattern matching.
+- The primary supervised target is the synthetic case `intended_label`.
+- Rule-engine outputs are used for validation and quality labeling only.
+
+Generate a balanced synthetic dataset:
+
+```bash
+python scripts/generate_dataset.py --seed 42 --samples-per-class 1000 --output-dir artifacts/datasets/run_name
+```
+
+Or via Docker:
+
+```bash
+make generate-dataset
+```
+
+Train and evaluate models:
+
+```bash
+python scripts/train_models.py --dataset-dir artifacts/datasets/run_name --dataset-variant default --output-dir artifacts/models/run_name --seed 42 --feature-modes raw_only hybrid --include-rule-score-experiment
+```
+
+Or via Docker:
+
+```bash
+make train-models
+```
+
+The dataset export includes:
+
+- `all_cases.csv`
+- `good_cases.csv`
+- `ambiguous_cases.csv`
+- `bad_cases.csv`
+- `train_dataset_strict.csv`
+- `train_dataset_default.csv`
+- split files for each training dataset variant
+- `dataset_summary.json`
+- `dataset_diagnostics.json`
+
+The training pipeline exports model artifacts, metrics, feature importance reports, and rule-engine-vs-ML comparison summaries under `artifacts/models/`.
+When using Docker, the `artifacts/` directory is bind-mounted so the generated datasets and model outputs are written back to the host project directory.
 
 ## API Endpoints
 

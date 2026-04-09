@@ -23,6 +23,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - ./artifacts:/app/artifacts
     environment:
       DB_HOST: db
       DB_PORT: 5432

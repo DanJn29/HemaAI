@@ -32,22 +32,33 @@ class PatternMatchingService:
         pattern_rules: Iterable[PatternRule],
         scorecards: dict[int, DiseaseScoreCard],
     ) -> dict[int, DiseaseScoreCard]:
+        matched_rules = self.get_matched_rules(interpreted_values, pattern_rules)
+        for pattern_rule in matched_rules:
+            scorecard = scorecards.setdefault(
+                pattern_rule.disease_id,
+                DiseaseScoreCard(disease=pattern_rule.disease),
+            )
+            scorecard.add_explanation(
+                ScoreExplanation(
+                    source_type=ExplanationSourceType.PATTERN_RULE,
+                    source_id=pattern_rule.id,
+                    explanation_text=pattern_rule.rule_description,
+                    score_effect=float(pattern_rule.bonus_weight),
+                )
+            )
+        return scorecards
+
+    def get_matched_rules(
+        self,
+        interpreted_values: Iterable[InterpretedValue],
+        pattern_rules: Iterable[PatternRule],
+    ) -> list[PatternRule]:
         interpreted_by_indicator = {item.indicator.id: item for item in interpreted_values}
+        matched_rules: list[PatternRule] = []
         for pattern_rule in pattern_rules:
             if self._matches(pattern_rule, interpreted_by_indicator):
-                scorecard = scorecards.setdefault(
-                    pattern_rule.disease_id,
-                    DiseaseScoreCard(disease=pattern_rule.disease),
-                )
-                scorecard.add_explanation(
-                    ScoreExplanation(
-                        source_type=ExplanationSourceType.PATTERN_RULE,
-                        source_id=pattern_rule.id,
-                        explanation_text=pattern_rule.rule_description,
-                        score_effect=float(pattern_rule.bonus_weight),
-                    )
-                )
-        return scorecards
+                matched_rules.append(pattern_rule)
+        return matched_rules
 
     def _matches(
         self,
