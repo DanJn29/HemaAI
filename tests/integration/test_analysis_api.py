@@ -34,7 +34,7 @@ def test_analysis_endpoint_ranks_bacterial_infection_first(client) -> None:
         "/api/v1/analyses",
         json={
             "sex": "male",
-            "age": 40,
+            "age": 52,
             "values": {
                 "WBC": 15.4,
                 "NEU": 12.8,
@@ -49,16 +49,38 @@ def test_analysis_endpoint_ranks_bacterial_infection_first(client) -> None:
     assert payload["top_hypotheses"][0]["disease_code"] == "bacterial_infection"
 
 
+def test_analysis_endpoint_returns_thrombocytopenia_pattern_for_elderly_adult(client) -> None:
+    response = client.post(
+        "/api/v1/analyses",
+        json={
+            "sex": "female",
+            "age": 72,
+            "values": {
+                "PLT": 78,
+                "HGB": 126,
+                "RBC": 4.0,
+                "HCT": 0.37,
+                "MCV": 90,
+                "WBC": 6.8,
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["top_hypotheses"][0]["disease_code"] == "thrombocytopenia_pattern"
+
+
 def test_analysis_endpoint_returns_normal_fallback_for_low_signal_profile(client) -> None:
     response = client.post(
         "/api/v1/analyses",
         json={
             "sex": "male",
-            "age": 36,
+            "age": 72,
             "values": {
                 "WBC": 10.1,
                 "NEU": 7.4,
-                "HGB": 150,
+                "HGB": 145,
                 "PLT": 220,
             },
         },

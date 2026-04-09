@@ -1,6 +1,6 @@
 # HemaAI MVP
 
-HemaAI is a backend-first MVP for AI-assisted blood test interpretation. It accepts manually entered CBC-style lab values, compares them against adult sex-aware reference ranges, applies a rule-based scoring engine plus multi-indicator pattern bonuses, and returns ranked disease hypotheses with explanations.
+HemaAI is a backend-first MVP for AI-assisted blood test interpretation. It accepts manually entered CBC-style lab values, compares them against adult sex- and age-aware reference ranges, applies a rule-based scoring engine plus multi-indicator pattern bonuses, and returns ranked disease hypotheses with explanations.
 
 This project is a clinical decision-support prototype. It does not provide a definitive diagnosis, does not replace a clinician, and uses demo seed data for educational development purposes.
 
@@ -77,7 +77,11 @@ High-side severity:
 ## Seed Data Scope
 
 - Adult-only demo ranges for ages `18-120`
-- Sex-aware ranges for `male` and `female`
+- Sex- and age-stratified ranges for `male` and `female`
+- Exact adult buckets for every indicator:
+  - `18-40`
+  - `41-65`
+  - `66-120`
 - Minimum indicator set:
   - `WBC`, `RBC`, `HGB`, `HCT`, `MCV`, `MCH`, `MCHC`, `PLT`, `RDW`, `NEU`, `LYM`, `MONO`, `EOS`, `BASO`
 - Disease hypotheses:
@@ -203,7 +207,7 @@ Populate demo catalog data:
 make seed
 ```
 
-The seed script is designed to be repeatable for the current MVP catalog records.
+The seed script replaces all `reference_ranges` rows in one transaction and repopulates them with the current age-stratified adult demo dataset.
 
 ## Environment Variables
 

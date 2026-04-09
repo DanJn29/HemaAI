@@ -16,12 +16,17 @@ class ReferenceRangeService:
             .where(ReferenceRange.sex == sex)
             .where(ReferenceRange.age_min <= age)
             .where(ReferenceRange.age_max >= age)
-            .order_by(ReferenceRange.age_min.desc())
+            .order_by(ReferenceRange.age_min, ReferenceRange.age_max)
         )
-        reference_range = self.session.scalar(stmt)
-        if reference_range is None:
+        matches = self.session.scalars(stmt).all()
+        if not matches:
             raise DomainValidationError(
                 f"No reference range configured for indicator_id={indicator_id}, sex={sex}, age={age}."
             )
-        return reference_range
-
+        if len(matches) > 1:
+            matched_ranges = ", ".join(f"{item.age_min}-{item.age_max}" for item in matches)
+            raise DomainValidationError(
+                "Ambiguous reference range configuration for "
+                f"indicator_id={indicator_id}, sex={sex}, age={age}. Matched ranges: {matched_ranges}."
+            )
+        return matches[0]

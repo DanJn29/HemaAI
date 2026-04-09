@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 from sqlalchemy import delete, select
@@ -22,6 +22,7 @@ from app.models.reference_range import ReferenceRange
 
 ADULT_AGE_MIN = 18
 ADULT_AGE_MAX = 120
+AGE_BUCKETS = ((18, 40), (41, 65), (66, 120))
 
 INDICATORS = [
     {"code": "WBC", "name": "White Blood Cell Count", "unit": "10^9/L", "description": "Total white blood cell count."},
@@ -117,7 +118,7 @@ DISEASES = [
     },
 ]
 
-REFERENCE_RANGES = {
+REFERENCE_RANGE_BASELINES = {
     Sex.MALE.value: {
         "WBC": (4.0, 10.0, 3.0, 2.0, 12.0, 15.0),
         "RBC": (4.5, 5.9, 4.0, 3.5, 6.2, 6.6),
@@ -152,9 +153,182 @@ REFERENCE_RANGES = {
     },
 }
 
+INDICATOR_AGE_ADJUSTMENTS = {
+    "RBC": {
+        (18, 40): Decimal("0"),
+        (41, 65): Decimal("-0.1"),
+        (66, 120): Decimal("-0.2"),
+    },
+    "HGB": {
+        (18, 40): Decimal("0"),
+        (41, 65): Decimal("-2"),
+        (66, 120): Decimal("-5"),
+    },
+    "HCT": {
+        (18, 40): Decimal("0"),
+        (41, 65): Decimal("-0.01"),
+        (66, 120): Decimal("-0.02"),
+    },
+    "MCV": {
+        (18, 40): Decimal("0"),
+        (41, 65): Decimal("1"),
+        (66, 120): Decimal("2"),
+    },
+}
+
+PLATELET_HIGH_ADJUSTMENTS = {
+    (18, 40): (
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+    ),
+    (41, 65): (
+        Decimal("-10"),
+        Decimal("-10"),
+        Decimal("-20"),
+    ),
+    (66, 120): (
+        Decimal("-20"),
+        Decimal("-30"),
+        Decimal("-50"),
+    ),
+}
+
 
 def decimalize(value: float) -> Decimal:
     return Decimal(str(value))
+
+
+def build_reference_range_rows() -> list[dict[str, Decimal | int | str]]:
+    rows: list[dict[str, Decimal | int | str]] = []
+    for sex, ranges in REFERENCE_RANGE_BASELINES.items():
+        for indicator_code, values in ranges.items():
+            base_values = tuple(decimalize(value) for value in values)
+            for age_min, age_max in AGE_BUCKETS:
+                rows.append(
+                    build_reference_range_row(
+                        indicator_code=indicator_code,
+                        sex=sex,
+                        age_min=age_min,
+                        age_max=age_max,
+                        baseline_values=base_values,
+                    )
+                )
+    validate_reference_range_rows(rows)
+    return rows
+
+
+def build_reference_range_row(
+    *,
+    indicator_code: str,
+    sex: str,
+    age_min: int,
+    age_max: int,
+    baseline_values: Sequence[Decimal],
+) -> dict[str, Decimal | int | str]:
+    normal_min, normal_max, moderate_low, severe_low, moderate_high, severe_high = baseline_values
+    bucket = (age_min, age_max)
+
+    if indicator_code == "PLT":
+        normal_max_adjustment, moderate_high_adjustment, severe_high_adjustment = PLATELET_HIGH_ADJUSTMENTS[bucket]
+        adjusted_normal_min = normal_min
+        adjusted_normal_max = normal_max + normal_max_adjustment
+        adjusted_moderate_low = moderate_low
+        adjusted_severe_low = severe_low
+        adjusted_moderate_high = moderate_high + moderate_high_adjustment
+        adjusted_severe_high = severe_high + severe_high_adjustment
+    else:
+        adjustment = INDICATOR_AGE_ADJUSTMENTS.get(indicator_code, {}).get(bucket, Decimal("0"))
+        adjusted_normal_min = normal_min + adjustment
+        adjusted_normal_max = normal_max + adjustment
+        adjusted_moderate_low = moderate_low + adjustment
+        adjusted_severe_low = severe_low + adjustment
+        adjusted_moderate_high = moderate_high + adjustment
+        adjusted_severe_high = severe_high + adjustment
+
+    return {
+        "indicator_code": indicator_code,
+        "sex": sex,
+        "age_min": age_min,
+        "age_max": age_max,
+        "normal_min": adjusted_normal_min,
+        "normal_max": adjusted_normal_max,
+        "mild_low_threshold": adjusted_normal_min,
+        "moderate_low_threshold": adjusted_moderate_low,
+        "severe_low_threshold": adjusted_severe_low,
+        "mild_high_threshold": adjusted_normal_max,
+        "moderate_high_threshold": adjusted_moderate_high,
+        "severe_high_threshold": adjusted_severe_high,
+    }
+
+
+def validate_reference_range_rows(rows: Sequence[dict[str, Decimal | int | str]]) -> None:
+    expected_row_count = len(INDICATORS) * len(Sex) * len(AGE_BUCKETS)
+    if len(rows) != expected_row_count:
+        raise ValueError(f"Expected {expected_row_count} reference range rows, got {len(rows)}.")
+
+    grouped: dict[tuple[str, str], list[dict[str, Decimal | int | str]]] = {}
+    for row in rows:
+        key = (str(row["indicator_code"]), str(row["sex"]))
+        grouped.setdefault(key, []).append(row)
+        validate_reference_range_row(row)
+
+    expected_buckets = list(AGE_BUCKETS)
+    for key, group in grouped.items():
+        buckets = sorted((int(row["age_min"]), int(row["age_max"])) for row in group)
+        if buckets != expected_buckets:
+            raise ValueError(f"Reference ranges for {key} must use exact buckets {expected_buckets}, got {buckets}.")
+        validate_non_overlapping_buckets(key, buckets)
+
+
+def validate_reference_range_row(row: dict[str, Decimal | int | str]) -> None:
+    age_min = int(row["age_min"])
+    age_max = int(row["age_max"])
+    if age_min < ADULT_AGE_MIN or age_max > ADULT_AGE_MAX or age_min > age_max:
+        raise ValueError(f"Invalid age bounds for reference range row: {(age_min, age_max)}.")
+
+    normal_min = Decimal(str(row["normal_min"]))
+    normal_max = Decimal(str(row["normal_max"]))
+    mild_low = Decimal(str(row["mild_low_threshold"]))
+    moderate_low = Decimal(str(row["moderate_low_threshold"]))
+    severe_low = Decimal(str(row["severe_low_threshold"]))
+    mild_high = Decimal(str(row["mild_high_threshold"]))
+    moderate_high = Decimal(str(row["moderate_high_threshold"]))
+    severe_high = Decimal(str(row["severe_high_threshold"]))
+
+    if not (severe_low <= moderate_low <= mild_low <= normal_min):
+        raise ValueError(f"Invalid low-threshold ordering for {row['indicator_code']} {row['sex']} {age_min}-{age_max}.")
+    if not (normal_min <= normal_max <= mild_high <= moderate_high <= severe_high):
+        raise ValueError(f"Invalid high-threshold ordering for {row['indicator_code']} {row['sex']} {age_min}-{age_max}.")
+    for name, value in (
+        ("normal_min", normal_min),
+        ("normal_max", normal_max),
+        ("moderate_low_threshold", moderate_low),
+        ("severe_low_threshold", severe_low),
+        ("moderate_high_threshold", moderate_high),
+        ("severe_high_threshold", severe_high),
+    ):
+        if value < 0:
+            raise ValueError(
+                f"Negative value for {name} in {row['indicator_code']} {row['sex']} {age_min}-{age_max}: {value}."
+            )
+
+
+def validate_non_overlapping_buckets(
+    key: tuple[str, str],
+    buckets: Sequence[tuple[int, int]],
+) -> None:
+    expected_start = ADULT_AGE_MIN
+    previous_end: int | None = None
+    for age_min, age_max in buckets:
+        if previous_end is None:
+            if age_min != expected_start:
+                raise ValueError(f"Reference ranges for {key} must start at age {expected_start}, got {age_min}.")
+        elif age_min != previous_end + 1:
+            raise ValueError(f"Reference ranges for {key} must be contiguous without overlap or gaps, got {buckets}.")
+        previous_end = age_max
+    if previous_end != ADULT_AGE_MAX:
+        raise ValueError(f"Reference ranges for {key} must end at age {ADULT_AGE_MAX}, got {previous_end}.")
 
 
 def upsert(session: Session, model: type, lookup: dict, defaults: dict):
@@ -222,29 +396,27 @@ def seed_diseases(session: Session) -> dict[str, Disease]:
 
 
 def seed_reference_ranges(session: Session, indicator_map: dict[str, Indicator]) -> None:
-    for sex, ranges in REFERENCE_RANGES.items():
-        for indicator_code, values in ranges.items():
-            normal_min, normal_max, moderate_low, severe_low, moderate_high, severe_high = values
-            upsert(
-                session,
-                ReferenceRange,
-                {
-                    "indicator_id": indicator_map[indicator_code].id,
-                    "sex": sex,
-                    "age_min": ADULT_AGE_MIN,
-                    "age_max": ADULT_AGE_MAX,
-                },
-                {
-                    "normal_min": decimalize(normal_min),
-                    "normal_max": decimalize(normal_max),
-                    "mild_low_threshold": decimalize(normal_min),
-                    "moderate_low_threshold": decimalize(moderate_low),
-                    "severe_low_threshold": decimalize(severe_low),
-                    "mild_high_threshold": decimalize(normal_max),
-                    "moderate_high_threshold": decimalize(moderate_high),
-                    "severe_high_threshold": decimalize(severe_high),
-                },
+    rows = build_reference_range_rows()
+    session.execute(delete(ReferenceRange))
+    session.flush()
+    for row in rows:
+        session.add(
+            ReferenceRange(
+                indicator_id=indicator_map[str(row["indicator_code"])].id,
+                sex=str(row["sex"]),
+                age_min=int(row["age_min"]),
+                age_max=int(row["age_max"]),
+                normal_min=Decimal(str(row["normal_min"])),
+                normal_max=Decimal(str(row["normal_max"])),
+                mild_low_threshold=Decimal(str(row["mild_low_threshold"])),
+                moderate_low_threshold=Decimal(str(row["moderate_low_threshold"])),
+                severe_low_threshold=Decimal(str(row["severe_low_threshold"])),
+                mild_high_threshold=Decimal(str(row["mild_high_threshold"])),
+                moderate_high_threshold=Decimal(str(row["moderate_high_threshold"])),
+                severe_high_threshold=Decimal(str(row["severe_high_threshold"])),
             )
+        )
+    session.flush()
 
 
 def add_indicator_rule(
