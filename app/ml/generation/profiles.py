@@ -12,6 +12,24 @@ DEFAULT_SIGNAL_STRENGTH_WEIGHTS = {
     "variant": 0.20,
 }
 
+CLASS_SIGNAL_STRENGTH_WEIGHTS = {
+    "bacterial_infection": {
+        "strong": 0.36,
+        "weak": 0.40,
+        "variant": 0.24,
+    },
+    "viral_infection": {
+        "strong": 0.48,
+        "weak": 0.34,
+        "variant": 0.18,
+    },
+    "hematologic_malignancy_suspicion": {
+        "strong": 0.62,
+        "weak": 0.28,
+        "variant": 0.10,
+    },
+}
+
 DEFAULT_ARCHETYPE_WEIGHTS = {
     "canonical": 0.45,
     "weaker": 0.20,
@@ -22,72 +40,72 @@ DEFAULT_ARCHETYPE_WEIGHTS = {
 
 CLASS_ARCHETYPE_WEIGHTS = {
     "normal": {
-        "canonical": 0.70,
+        "canonical": 0.73,
         "weaker": 0.18,
-        "borderline": 0.09,
-        "overlap": 0.02,
-        "conflicted": 0.01,
+        "borderline": 0.07,
+        "overlap": 0.015,
+        "conflicted": 0.005,
     },
     "iron_deficiency_anemia": {
-        "canonical": 0.42,
-        "weaker": 0.24,
-        "borderline": 0.22,
+        "canonical": 0.46,
+        "weaker": 0.25,
+        "borderline": 0.18,
         "overlap": 0.08,
-        "conflicted": 0.04,
+        "conflicted": 0.03,
     },
     "macrocytic_anemia": {
-        "canonical": 0.44,
-        "weaker": 0.22,
-        "borderline": 0.22,
+        "canonical": 0.47,
+        "weaker": 0.24,
+        "borderline": 0.18,
         "overlap": 0.08,
-        "conflicted": 0.04,
+        "conflicted": 0.03,
     },
     "bacterial_infection": {
-        "canonical": 0.34,
-        "weaker": 0.24,
-        "borderline": 0.22,
-        "overlap": 0.14,
-        "conflicted": 0.06,
+        "canonical": 0.38,
+        "weaker": 0.25,
+        "borderline": 0.20,
+        "overlap": 0.12,
+        "conflicted": 0.05,
     },
     "viral_infection": {
-        "canonical": 0.34,
-        "weaker": 0.24,
-        "borderline": 0.22,
-        "overlap": 0.14,
-        "conflicted": 0.06,
+        "canonical": 0.38,
+        "weaker": 0.25,
+        "borderline": 0.20,
+        "overlap": 0.12,
+        "conflicted": 0.05,
     },
     "allergic_or_parasitic_pattern": {
-        "canonical": 0.46,
-        "weaker": 0.22,
-        "borderline": 0.20,
-        "overlap": 0.08,
-        "conflicted": 0.04,
-    },
-    "thrombocytopenia_pattern": {
-        "canonical": 0.42,
-        "weaker": 0.22,
-        "borderline": 0.20,
-        "overlap": 0.10,
-        "conflicted": 0.06,
-    },
-    "hematologic_malignancy_suspicion": {
         "canonical": 0.50,
         "weaker": 0.22,
+        "borderline": 0.18,
+        "overlap": 0.07,
+        "conflicted": 0.03,
+    },
+    "thrombocytopenia_pattern": {
+        "canonical": 0.46,
+        "weaker": 0.23,
+        "borderline": 0.18,
+        "overlap": 0.09,
+        "conflicted": 0.04,
+    },
+    "hematologic_malignancy_suspicion": {
+        "canonical": 0.54,
+        "weaker": 0.22,
         "borderline": 0.16,
-        "overlap": 0.08,
+        "overlap": 0.06,
         "conflicted": 0.04,
     },
 }
 
 CLASS_QUALITY_TARGETS = {
     "normal": {"ambiguous": 0.02, "bad": 0.01},
-    "iron_deficiency_anemia": {"ambiguous": 0.10, "bad": 0.03},
-    "macrocytic_anemia": {"ambiguous": 0.10, "bad": 0.03},
-    "bacterial_infection": {"ambiguous": 0.15, "bad": 0.05},
-    "viral_infection": {"ambiguous": 0.15, "bad": 0.05},
-    "allergic_or_parasitic_pattern": {"ambiguous": 0.10, "bad": 0.03},
-    "thrombocytopenia_pattern": {"ambiguous": 0.10, "bad": 0.04},
-    "hematologic_malignancy_suspicion": {"ambiguous": 0.20, "bad": 0.10},
+    "iron_deficiency_anemia": {"ambiguous": 0.18, "bad": 0.02},
+    "macrocytic_anemia": {"ambiguous": 0.20, "bad": 0.02},
+    "bacterial_infection": {"ambiguous": 0.25, "bad": 0.04},
+    "viral_infection": {"ambiguous": 0.25, "bad": 0.04},
+    "allergic_or_parasitic_pattern": {"ambiguous": 0.20, "bad": 0.02},
+    "thrombocytopenia_pattern": {"ambiguous": 0.10, "bad": 0.03},
+    "hematologic_malignancy_suspicion": {"ambiguous": 0.18, "bad": 0.08},
 }
 
 OVERLAP_NEIGHBOR_MAP = {
@@ -155,6 +173,7 @@ class ClassProfile:
     secondary_indicators: tuple[str, ...] = ()
     optional_indicators: tuple[str, ...] = ()
     overlap_neighbors: tuple[str, ...] = ()
+    signal_strength_weights_override: dict[str, float] | None = None
     archetype_weights_override: dict[str, float] | None = None
     target_ambiguous_ratio: float = 0.20
     target_bad_ratio: float = 0.10
@@ -240,6 +259,7 @@ CLASS_PROFILES: dict[str, ClassProfile] = {
         secondary_indicators=("MONO",),
         optional_indicators=("LYM",),
         overlap_neighbors=OVERLAP_NEIGHBOR_MAP["bacterial_infection"],
+        signal_strength_weights_override=CLASS_SIGNAL_STRENGTH_WEIGHTS["bacterial_infection"],
         archetype_weights_override=CLASS_ARCHETYPE_WEIGHTS["bacterial_infection"],
         target_ambiguous_ratio=CLASS_QUALITY_TARGETS["bacterial_infection"]["ambiguous"],
         target_bad_ratio=CLASS_QUALITY_TARGETS["bacterial_infection"]["bad"],
@@ -256,6 +276,7 @@ CLASS_PROFILES: dict[str, ClassProfile] = {
         secondary_indicators=("WBC",),
         optional_indicators=("NEU",),
         overlap_neighbors=OVERLAP_NEIGHBOR_MAP["viral_infection"],
+        signal_strength_weights_override=CLASS_SIGNAL_STRENGTH_WEIGHTS["viral_infection"],
         archetype_weights_override=CLASS_ARCHETYPE_WEIGHTS["viral_infection"],
         target_ambiguous_ratio=CLASS_QUALITY_TARGETS["viral_infection"]["ambiguous"],
         target_bad_ratio=CLASS_QUALITY_TARGETS["viral_infection"]["bad"],
@@ -292,15 +313,16 @@ CLASS_PROFILES: dict[str, ClassProfile] = {
     "hematologic_malignancy_suspicion": ClassProfile(
         code="hematologic_malignancy_suspicion",
         indicators={
-            "WBC": IndicatorSignalPlan("moderate_high", "mild_high", "normal"),
-            "HGB": IndicatorSignalPlan("moderate_low", "mild_low", "moderate_low"),
-            "PLT": IndicatorSignalPlan("moderate_low", "mild_low", "moderate_low"),
-            "BASO": IndicatorSignalPlan("mild_high", "normal", "mild_high"),
+            "WBC": IndicatorSignalPlan("moderate_high", "mild_high", "mild_high"),
+            "HGB": IndicatorSignalPlan("moderate_low", "mild_low", "mild_low"),
+            "PLT": IndicatorSignalPlan("moderate_low", "mild_low", "mild_low"),
+            "BASO": IndicatorSignalPlan("mild_high", "mild_high", "mild_high"),
         },
         core_indicators=("HGB", "PLT"),
         secondary_indicators=("WBC", "BASO"),
         optional_indicators=("MCV", "MCH", "NEU"),
         overlap_neighbors=OVERLAP_NEIGHBOR_MAP["hematologic_malignancy_suspicion"],
+        signal_strength_weights_override=CLASS_SIGNAL_STRENGTH_WEIGHTS["hematologic_malignancy_suspicion"],
         archetype_weights_override=CLASS_ARCHETYPE_WEIGHTS["hematologic_malignancy_suspicion"],
         target_ambiguous_ratio=CLASS_QUALITY_TARGETS["hematologic_malignancy_suspicion"]["ambiguous"],
         target_bad_ratio=CLASS_QUALITY_TARGETS["hematologic_malignancy_suspicion"]["bad"],

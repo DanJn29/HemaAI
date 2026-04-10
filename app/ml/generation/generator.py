@@ -25,7 +25,7 @@ DEFAULT_AGE_BUCKET_WEIGHTS = {
 DEFAULT_QUALITY_TARGETS = {
     "GOOD": 0.70,
     "AMBIGUOUS": 0.20,
-    "BAD": 0.10,
+    "BAD": 0.08,
 }
 SAMPLING_STYLES = (
     "interior",
@@ -77,11 +77,17 @@ class SyntheticGenerationConfig:
         default_factory=lambda: dict(DEFAULT_QUALITY_TARGETS),
     )
     default_dataset_ambiguous_ratio: float = 0.25
-    bad_ratio_upper: float = 0.15
-    bad_ratio_recovery: float = 0.08
-    min_conflicted_weight: float = 0.02
+    bad_ratio_upper: float = 0.10
+    bad_ratio_recovery: float = 0.06
+    min_conflicted_weight: float = 0.015
     conflicted_reduction_factor: float = 0.75
-    conflicted_recovery_factor: float = 1.10
+    conflicted_recovery_factor: float = 1.08
+    min_overlap_factor: float = 0.70
+    overlap_reduction_factor: float = 0.90
+    overlap_recovery_factor: float = 1.03
+    low_ambiguity_ratio: float = 0.12
+    low_ambiguity_min_cases: int = 80
+    low_ambiguity_min_non_malignancy_classes: int = 3
     rolling_bad_window: int = 200
     max_attempt_multiplier: int = 20
 
@@ -124,9 +130,9 @@ class SyntheticCaseGenerator:
         if age is not None:
             selected_age_bucket = self._bucket_for_age(age)
 
-        selected_signal_strength = signal_strength or self._weighted_choice(
-            self.config.signal_strength_weights,
-        )
+        profile = CLASS_PROFILES[intended_label]
+        signal_weights = profile.signal_strength_weights_override or self.config.signal_strength_weights
+        selected_signal_strength = signal_strength or self._weighted_choice(signal_weights)
         if selected_signal_strength not in SIGNAL_STRENGTHS:
             raise ValueError(f"Unsupported signal strength: {selected_signal_strength}")
 
@@ -134,7 +140,6 @@ class SyntheticCaseGenerator:
         if selected_archetype not in ARCHETYPES:
             raise ValueError(f"Unsupported archetype: {selected_archetype}")
 
-        profile = CLASS_PROFILES[intended_label]
         intended_states = {indicator_code: "normal" for indicator_code in self.indicator_codes}
         intended_states.update(profile.states_for(selected_signal_strength))
         sampling_styles = self._initial_sampling_styles(intended_states)
@@ -305,8 +310,8 @@ class SyntheticCaseGenerator:
     ) -> None:
         if profile.code == "normal":
             self._edge_normalise_normals(profile, states, sampling_styles, count=6)
-            if archetype in {"overlap", "conflicted"} and self.rng.random() < 0.22:
-                indicator_code = self._pick_indicators(["MONO", "RDW", "WBC"], 1)[0]
+            if archetype in {"overlap", "conflicted"} and self.rng.random() < 0.10:
+                indicator_code = self._choice(("MONO", "RDW", "MONO", "RDW", "WBC"))
                 states[indicator_code] = "mild_high"
                 sampling_styles[indicator_code] = "near_normal_boundary"
             self._limit_normal_excursions(states, sampling_styles)
@@ -314,20 +319,27 @@ class SyntheticCaseGenerator:
 
         if profile.code == "iron_deficiency_anemia":
             if archetype in {"weaker", "borderline"}:
-                states["RDW"] = self._soften_state(states["RDW"], steps=1)
-                sampling_styles["RDW"] = "near_normal_boundary"
-                for code in ("RBC", "HCT", "MCHC"):
+                soften_count = 1 if archetype == "weaker" else 2
+                for code in self._pick_indicators(["RDW", "RBC", "HCT", "MCHC"], soften_count):
                     states[code] = self._soften_state(states[code], steps=1)
                     sampling_styles[code] = (
                         "near_normal_boundary" if states[code] != "normal" else "edge_normal"
                     )
-            if archetype in {"overlap", "conflicted"}:
+            if archetype in {"borderline", "overlap", "conflicted"}:
                 for code in ("HGB", "MCV", "MCH"):
                     sampling_styles[code] = "near_normal_boundary"
-            if archetype == "conflicted" and overlap_source == "hematologic_malignancy_suspicion":
-                if "PLT" in borrowed_indicators and self.rng.random() < 0.60:
-                    states["PLT"] = "moderate_low"
+            if archetype == "overlap":
+                softened_core = self._pick_indicators(["HGB", "MCV", "MCH"], 1)[0]
+                states[softened_core] = self._soften_state(
+                    states[softened_core],
+                    preserve_abnormal=True,
+                )
+                sampling_styles[softened_core] = "near_normal_boundary"
+            if archetype in {"overlap", "conflicted"} and overlap_source == "hematologic_malignancy_suspicion":
+                if "PLT" in borrowed_indicators and (archetype == "overlap" or self.rng.random() < 0.60):
+                    states["PLT"] = "mild_low"
                     sampling_styles["PLT"] = "near_normal_boundary"
+            if archetype == "conflicted" and overlap_source == "hematologic_malignancy_suspicion":
                 softened_core = self._pick_indicators(["HGB", "MCV", "MCH"], 1)[0]
                 states[softened_core] = self._soften_state(
                     states[softened_core],
@@ -337,11 +349,25 @@ class SyntheticCaseGenerator:
             return
 
         if profile.code == "macrocytic_anemia":
-            if archetype in {"weaker", "borderline", "overlap"}:
-                states["MCV"] = self._soften_state(states["MCV"], steps=1, preserve_abnormal=True)
+            if archetype == "weaker":
+                softened_code = self._pick_indicators(["MCV", "HGB"], 1)[0]
+                states[softened_code] = self._soften_state(
+                    states[softened_code],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles[softened_code] = "near_normal_boundary"
+            if archetype in {"borderline", "overlap"}:
                 sampling_styles["MCV"] = "near_normal_boundary"
-                states["HGB"] = self._soften_state(states["HGB"], steps=1, preserve_abnormal=True)
                 sampling_styles["HGB"] = "near_normal_boundary"
+                softened_code = self._pick_indicators(["MCV", "HGB"], 1)[0]
+                states[softened_code] = self._soften_state(
+                    states[softened_code],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles[softened_code] = "near_normal_boundary"
+            if archetype in {"weaker", "borderline", "overlap"}:
                 if self.rng.random() < 0.60:
                     states["RDW"] = self._soften_state(states["RDW"], steps=1)
                     sampling_styles["RDW"] = (
@@ -353,47 +379,66 @@ class SyntheticCaseGenerator:
             return
 
         if profile.code == "bacterial_infection":
-            if archetype in {"weaker", "borderline", "overlap"}:
-                states["WBC"] = self._soften_state(states["WBC"], steps=1, preserve_abnormal=True)
-                states["NEU"] = self._soften_state(states["NEU"], steps=1, preserve_abnormal=True)
+            if archetype in {"weaker", "borderline"}:
+                softened_code = self._pick_indicators(["WBC", "NEU"], 1)[0]
+                states[softened_code] = self._soften_state(
+                    states[softened_code],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles[softened_code] = "near_normal_boundary"
+                if archetype == "borderline":
+                    other_code = "NEU" if softened_code == "WBC" else "WBC"
+                    sampling_styles[other_code] = "near_normal_boundary"
+            if archetype == "overlap":
+                states["WBC"] = self._soften_state(
+                    states["WBC"],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                states["NEU"] = self._soften_state(states["NEU"], steps=1)
                 sampling_styles["WBC"] = "near_normal_boundary"
-                sampling_styles["NEU"] = "near_normal_boundary"
+                sampling_styles["NEU"] = (
+                    "near_normal_boundary" if states["NEU"] != "normal" else "edge_normal"
+                )
             if archetype in {"overlap", "conflicted"} and (
                 states["LYM"] == "normal" or "LYM" in borrowed_indicators
             ):
                 states["LYM"] = "mild_high"
                 sampling_styles["LYM"] = "near_normal_boundary"
-                if archetype == "overlap" and self.rng.random() < 0.30:
-                    states["NEU"] = "normal"
-                    sampling_styles["NEU"] = "edge_normal"
             if archetype == "conflicted":
-                if "LYM" in borrowed_indicators and self.rng.random() < 0.65:
-                    states["NEU"] = "normal"
-                    sampling_styles["NEU"] = "edge_normal"
-                    if self.rng.random() < 0.70:
-                        states["WBC"] = "normal"
-                        sampling_styles["WBC"] = "edge_normal"
-                    else:
-                        states["WBC"] = "mild_high"
-                        sampling_styles["WBC"] = "near_normal_boundary"
-                else:
-                    if self.rng.random() < 0.45:
-                        states["NEU"] = "normal"
-                        sampling_styles["NEU"] = "edge_normal"
-                    if self.rng.random() < 0.55:
-                        states["WBC"] = "mild_high"
-                        sampling_styles["WBC"] = "near_normal_boundary"
-                    elif self.rng.random() < 0.40:
-                        states["NEU"] = "mild_high"
-                        sampling_styles["NEU"] = "near_normal_boundary"
+                softened_code = self._pick_indicators(["WBC", "NEU"], 1)[0]
+                states[softened_code] = self._soften_state(
+                    states[softened_code],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles[softened_code] = "near_normal_boundary"
+                other_code = "NEU" if softened_code == "WBC" else "WBC"
+                if states[other_code] == "normal":
+                    states[other_code] = "mild_high"
+                sampling_styles[other_code] = (
+                    "near_normal_boundary" if states[other_code] != "normal" else "edge_normal"
+                )
+                if self.rng.random() < 0.35:
+                    states["MONO"] = "mild_high"
+                    sampling_styles["MONO"] = "near_normal_boundary"
             return
 
         if profile.code == "viral_infection":
-            if archetype in {"weaker", "borderline", "overlap"}:
-                states["WBC"] = self._soften_state(states["WBC"], steps=1, preserve_abnormal=True)
+            if archetype == "weaker":
+                states["WBC"] = self._soften_state(states["WBC"], steps=1)
                 sampling_styles["WBC"] = (
                     "near_normal_boundary" if states["WBC"] != "normal" else "edge_normal"
                 )
+            if archetype == "borderline":
+                states["WBC"] = self._soften_state(
+                    states["WBC"],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles["WBC"] = "near_normal_boundary"
+            if archetype in {"borderline", "overlap"}:
                 states["LYM"] = self._soften_state(
                     states["LYM"],
                     steps=1,
@@ -405,28 +450,38 @@ class SyntheticCaseGenerator:
             ):
                 states["NEU"] = "mild_high"
                 sampling_styles["NEU"] = "near_normal_boundary"
-                if archetype == "overlap" and self.rng.random() < 0.25:
-                    states["WBC"] = "normal"
-                    sampling_styles["WBC"] = "edge_normal"
+            if archetype == "overlap":
+                states["WBC"] = self._soften_state(
+                    states["WBC"],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+                sampling_styles["WBC"] = (
+                    "near_normal_boundary" if states["WBC"] != "normal" else "edge_normal"
+                )
             if archetype == "conflicted":
-                states["LYM"] = self._soften_state(states["LYM"], preserve_abnormal=True)
-                if "NEU" in borrowed_indicators and self.rng.random() < 0.55:
-                    states["WBC"] = "normal"
-                    sampling_styles["WBC"] = "edge_normal"
-                else:
-                    if states["WBC"] == "normal" and self.rng.random() < 0.60:
-                        states["WBC"] = "mild_high"
+                if self.rng.random() < 0.75:
+                    states["WBC"] = self._soften_state(
+                        states["WBC"],
+                        steps=1,
+                        preserve_abnormal=True,
+                    )
                     sampling_styles["WBC"] = (
                         "near_normal_boundary" if states["WBC"] != "normal" else "edge_normal"
                     )
-                sampling_styles["LYM"] = "near_normal_boundary"
+                else:
+                    states["LYM"] = self._soften_state(
+                        states["LYM"],
+                        preserve_abnormal=True,
+                    )
+                    sampling_styles["LYM"] = "near_normal_boundary"
             return
 
         if profile.code == "allergic_or_parasitic_pattern":
             sampling_styles["EOS"] = "near_normal_boundary" if archetype != "canonical" else "interior"
             if archetype in {"borderline", "overlap", "conflicted"}:
                 states["EOS"] = "moderate_high"
-                if states["WBC"] == "normal" and self.rng.random() < 0.65:
+                if states["WBC"] == "normal" and self.rng.random() < 0.50:
                     states["WBC"] = "mild_high"
                 sampling_styles["WBC"] = "near_normal_boundary"
             if archetype in {"overlap", "conflicted"} and "LYM" in borrowed_indicators:
@@ -435,7 +490,11 @@ class SyntheticCaseGenerator:
                 if states["WBC"] == "normal":
                     states["WBC"] = "mild_high"
                     sampling_styles["WBC"] = "near_normal_boundary"
-            if archetype == "conflicted" and "LYM" in borrowed_indicators:
+            if (
+                archetype == "conflicted"
+                and "LYM" in borrowed_indicators
+                and self.rng.random() < 0.30
+            ):
                 states["EOS"] = "mild_high"
                 sampling_styles["EOS"] = "near_normal_boundary"
             return
@@ -444,29 +503,29 @@ class SyntheticCaseGenerator:
             if archetype in {"weaker", "borderline"}:
                 states["PLT"] = self._soften_state(states["PLT"], steps=1, preserve_abnormal=True)
                 sampling_styles["PLT"] = "near_normal_boundary"
-            if archetype in {"overlap", "conflicted"} and states["HGB"] == "normal":
-                states["HGB"] = "mild_low"
-                sampling_styles["HGB"] = "near_normal_boundary"
-            if archetype in {"overlap", "conflicted"} and overlap_source == "iron_deficiency_anemia":
-                if "HCT" in borrowed_indicators:
-                    states["HCT"] = "mild_low"
-                    sampling_styles["HCT"] = "near_normal_boundary"
-            if archetype in {"overlap", "conflicted"} and overlap_source == "hematologic_malignancy_suspicion":
-                if "WBC" in borrowed_indicators:
-                    states["WBC"] = "mild_high"
-                    sampling_styles["WBC"] = "near_normal_boundary"
-                    states["HGB"] = "moderate_low" if archetype == "conflicted" else "mild_low"
-                    sampling_styles["HGB"] = "near_normal_boundary"
-                if "HGB" in borrowed_indicators:
-                    states["HGB"] = "moderate_low" if archetype == "conflicted" else "mild_low"
-                    sampling_styles["HGB"] = "near_normal_boundary"
-                    states["WBC"] = "mild_high"
-                    sampling_styles["WBC"] = "near_normal_boundary"
-                if "NEU" in borrowed_indicators:
-                    states["NEU"] = "mild_high"
-                    sampling_styles["NEU"] = "near_normal_boundary"
-                    states["WBC"] = "mild_high"
-                    sampling_styles["WBC"] = "near_normal_boundary"
+            if archetype in {"overlap", "conflicted"}:
+                states["PLT"] = self._soften_state(states["PLT"], steps=1, preserve_abnormal=True)
+                sampling_styles["PLT"] = "near_normal_boundary"
+                secondary_candidates: list[tuple[str, str]] = []
+                if states["HGB"] == "normal":
+                    secondary_candidates.append(("HGB", "mild_low"))
+                if overlap_source == "iron_deficiency_anemia" and "HCT" in borrowed_indicators:
+                    secondary_candidates.append(("HCT", "mild_low"))
+                elif overlap_source == "iron_deficiency_anemia":
+                    secondary_candidates.append(("HCT", "mild_low"))
+                if overlap_source == "hematologic_malignancy_suspicion":
+                    if "WBC" in borrowed_indicators:
+                        secondary_candidates.append(("WBC", "mild_high"))
+                    if "HGB" in borrowed_indicators:
+                        secondary_candidates.append(("HGB", "mild_low"))
+                    if "NEU" in borrowed_indicators:
+                        secondary_candidates.append(("NEU", "mild_high"))
+                if secondary_candidates:
+                    indicator_code, state_code = secondary_candidates[
+                        int(self.rng.integers(0, len(secondary_candidates)))
+                    ]
+                    states[indicator_code] = state_code
+                    sampling_styles[indicator_code] = "near_normal_boundary"
             return
 
         if profile.code == "hematologic_malignancy_suspicion":
@@ -475,6 +534,7 @@ class SyntheticCaseGenerator:
                 sampling_styles=sampling_styles,
                 signal_strength=signal_strength,
                 archetype=archetype,
+                borrowed_indicators=borrowed_indicators,
             )
 
     def _apply_malignancy_template(
@@ -484,11 +544,14 @@ class SyntheticCaseGenerator:
         sampling_styles: dict[str, str],
         signal_strength: str,
         archetype: str,
+        borrowed_indicators: set[str],
     ) -> None:
         template = str(self.rng.choice(("mixed", "cytopenic", "leukocytic")))
 
         if template == "cytopenic":
-            states["WBC"] = "normal" if signal_strength != "strong" else "mild_high"
+            states["WBC"] = "mild_high" if archetype in {"canonical", "weaker"} else (
+                "normal" if signal_strength != "strong" else "mild_high"
+            )
             states["HGB"] = self._soften_state(states["HGB"], steps=0 if archetype == "canonical" else 1, preserve_abnormal=True)
             states["PLT"] = self._soften_state(states["PLT"], steps=0 if archetype == "canonical" else 1, preserve_abnormal=True)
         elif template == "leukocytic":
@@ -497,16 +560,25 @@ class SyntheticCaseGenerator:
             states["HGB"] = self._soften_state(states["HGB"], steps=1, preserve_abnormal=True)
         else:
             states["WBC"] = self._soften_state(states["WBC"], steps=1 if archetype != "canonical" else 0, preserve_abnormal=True)
-            states["HGB"] = self._soften_state(states["HGB"], steps=1 if archetype in {"weaker", "borderline"} else 0, preserve_abnormal=True)
-            states["PLT"] = self._soften_state(states["PLT"], steps=1 if archetype in {"weaker", "borderline"} else 0, preserve_abnormal=True)
+            if archetype in {"weaker", "borderline"}:
+                softened_code = self._pick_indicators(["HGB", "PLT"], 1)[0]
+                states[softened_code] = self._soften_state(
+                    states[softened_code],
+                    steps=1,
+                    preserve_abnormal=True,
+                )
+
+        if archetype == "canonical" and signal_strength != "strong":
+            reinforced_code = self._pick_indicators(["HGB", "PLT"], 1)[0]
+            states[reinforced_code] = "moderate_low"
 
         for code in ("WBC", "HGB", "PLT", "BASO"):
             sampling_styles[code] = "near_normal_boundary" if archetype != "canonical" else "interior"
 
-        if archetype in {"overlap", "conflicted"} and self.rng.random() < 0.25:
+        if archetype in {"overlap", "conflicted"} and not borrowed_indicators and self.rng.random() < 0.05:
             states["MCV"] = "mild_low"
             sampling_styles["MCV"] = "near_normal_boundary"
-        if archetype == "conflicted" and self.rng.random() < 0.25:
+        if archetype == "conflicted" and not borrowed_indicators and self.rng.random() < 0.05:
             states["NEU"] = "mild_high"
             sampling_styles["NEU"] = "near_normal_boundary"
 

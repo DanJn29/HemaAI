@@ -14,7 +14,7 @@ def test_synthetic_dataset_and_training_pipeline_smoke(db_session, tmp_path: Pat
 
     builder = SyntheticDatasetBuilder(
         session=db_session,
-        config=SyntheticGenerationConfig(seed=42, samples_per_class=8),
+        config=SyntheticGenerationConfig(seed=42, samples_per_class=16),
     )
     bundle = builder.build()
     builder.export(dataset_dir, bundle)
@@ -56,6 +56,7 @@ def test_synthetic_dataset_and_training_pipeline_smoke(db_session, tmp_path: Pat
     diagnostics = json.loads((dataset_dir / "dataset_diagnostics.json").read_text())
     assert int(summary["global_counts"]["ambiguous_cases"]) > 0
     assert int(summary["global_counts"]["bad_cases"]) > 0
-    assert float(summary["hm_ambiguous_share"]) < 1.0
-    assert int(diagnostics["non_malignancy_ambiguous_class_count"]) >= 2
+    assert float(summary["hm_ambiguous_share"]) < 0.50
+    assert float(summary["hm_bad_share"]) < 0.50
+    assert int(diagnostics["non_malignancy_ambiguous_class_count"]) >= 3
     assert float(results["rule_engine"]["accuracy"]) < 1.0

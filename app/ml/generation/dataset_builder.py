@@ -26,6 +26,11 @@ class QualityMixController:
             label: float(weights.get("conflicted", 0.0))
             for label, weights in self.base_archetype_weights_by_label.items()
         }
+        self.current_overlap_factors = {
+            label: 1.0
+            for label, profile in CLASS_PROFILES.items()
+            if profile.overlap_neighbors
+        }
         self.hm_overlap_factor = 1.0
         self.hm_conflicted_factor = 1.0
         self.global_quality_counts: Counter[str] = Counter()
@@ -38,24 +43,26 @@ class QualityMixController:
         self.per_class_quality_counts[label][quality_label] += 1
         self.attempt_counts[label] += 1
         self.rolling_quality_window.append(quality_label)
-        self._adjust_conflicted_weight()
+        self._adjust_difficulty_weights()
         self._adjust_malignancy_share_weights()
 
     def archetype_weights_for(self, label: str) -> dict[str, float]:
         profile = CLASS_PROFILES[label]
         weights = dict(self.base_archetype_weights_by_label[label])
         weights["conflicted"] = self.current_conflicted_weights[label]
+        if profile.overlap_neighbors:
+            weights["overlap"] *= self.current_overlap_factors[label]
         if label == "hematologic_malignancy_suspicion":
             weights["overlap"] *= self.hm_overlap_factor
             weights["conflicted"] *= self.hm_conflicted_factor
 
         total_attempts = sum(self.global_quality_counts.values())
         class_attempts = self.attempt_counts[label]
-        total_ambiguous = self.global_quality_counts["AMBIGUOUS"]
 
         global_good_ratio = self._ratio(self.global_quality_counts, total_attempts, "GOOD")
         global_ambiguous_ratio = self._ratio(self.global_quality_counts, total_attempts, "AMBIGUOUS")
         global_bad_ratio = self._ratio(self.global_quality_counts, total_attempts, "BAD")
+        non_malignancy_ambiguous_classes = self._non_malignancy_quality_class_count("AMBIGUOUS")
         class_ambiguous_target = profile.target_ambiguous_ratio
         class_bad_target = profile.target_bad_ratio
         class_ambiguous_ratio = self._ratio(
@@ -68,62 +75,91 @@ class QualityMixController:
             class_attempts,
             "BAD",
         )
+        low_ambiguity_guard = (
+            total_attempts >= self.config.low_ambiguity_min_cases
+            and (
+                global_ambiguous_ratio < self.config.low_ambiguity_ratio
+                or non_malignancy_ambiguous_classes < self.config.low_ambiguity_min_non_malignancy_classes
+            )
+        )
 
         if total_attempts >= 10 and global_ambiguous_ratio < self.config.quality_targets["AMBIGUOUS"]:
-            weights["borderline"] *= 1.35
-            weights["overlap"] *= 1.55
+            weights["borderline"] *= 1.10
+            weights["overlap"] *= 1.20
         elif total_attempts >= 10 and global_ambiguous_ratio > self.config.quality_targets["AMBIGUOUS"] + 0.08:
-            weights["borderline"] *= 0.90
-            weights["overlap"] *= 0.90
+            weights["borderline"] *= 0.92
+            weights["overlap"] *= 0.92
 
         if class_attempts >= 4 and class_ambiguous_ratio < class_ambiguous_target:
             ambiguity_gap = class_ambiguous_target - class_ambiguous_ratio
-            weights["borderline"] *= 1.15 + min(0.35, ambiguity_gap * 2.5)
-            weights["overlap"] *= 1.20 + min(0.60, ambiguity_gap * 4.0)
-            if profile.overlap_neighbors and ambiguity_gap > 0.05:
-                weights["canonical"] *= 0.92
-                weights["weaker"] *= 0.96
+            weights["borderline"] *= 1.05 + min(0.20, ambiguity_gap * 1.5)
+            if profile.overlap_neighbors:
+                weights["overlap"] *= 1.08 + min(0.25, ambiguity_gap * 2.0)
         elif class_attempts >= 4 and class_ambiguous_ratio > class_ambiguous_target + 0.08:
-            weights["borderline"] *= 0.90
-            weights["overlap"] *= 0.90
+            weights["borderline"] *= 0.92
+            weights["overlap"] *= 0.92
 
         if total_attempts >= 10 and global_good_ratio < self.config.quality_targets["GOOD"]:
-            weights["canonical"] *= 1.15
-            weights["weaker"] *= 1.10
+            weights["canonical"] *= 1.10
+            weights["weaker"] *= 1.06
 
         if (
             total_attempts >= 10
             and global_bad_ratio < self.config.quality_targets["BAD"]
             and class_bad_ratio < class_bad_target
         ):
-            weights["conflicted"] *= 1.20
+            weights["conflicted"] *= 1.08
         elif total_attempts >= 10 and global_bad_ratio > self.config.bad_ratio_upper:
-            weights["conflicted"] *= 0.70
+            weights["conflicted"] *= 0.80
+            if profile.overlap_neighbors:
+                weights["overlap"] *= 0.95
             weights["canonical"] *= 1.10
             weights["weaker"] *= 1.05
 
-        if (
-            label == "bacterial_infection"
-            and class_attempts >= 6
-            and class_bad_ratio == 0.0
-        ):
-            weights["conflicted"] *= 1.60
-            weights["canonical"] *= 0.94
-
         if class_attempts >= 6 and class_bad_ratio > max(class_bad_target, self.config.bad_ratio_upper):
-            weights["conflicted"] *= 0.45
-            weights["borderline"] *= 0.85
+            weights["conflicted"] *= 0.40
+            weights["borderline"] *= 0.92
             weights["overlap"] *= 0.90
-            weights["canonical"] *= 1.20
-            weights["weaker"] *= 1.10
+            weights["canonical"] *= 1.12
+            weights["weaker"] *= 1.08
+
+        if low_ambiguity_guard and class_ambiguous_ratio < class_ambiguous_target:
+            weights["borderline"] *= 1.20
+            if profile.overlap_neighbors and label != "hematologic_malignancy_suspicion":
+                weights["overlap"] *= 1.10
+            weights["conflicted"] *= 0.95
+
+        if label == "hematologic_malignancy_suspicion" and total_attempts >= 40:
+            hm_ambiguous = self.per_class_quality_counts[label]["AMBIGUOUS"]
+            hm_share = hm_ambiguous / max(self.global_quality_counts["AMBIGUOUS"], 1)
+            if hm_share > 0.35:
+                weights["borderline"] *= 0.60
+                weights["overlap"] *= 0.55
+                weights["conflicted"] *= 0.60
+                weights["canonical"] *= 1.20
+                weights["weaker"] *= 1.10
 
         return self._normalize(weights)
 
-    def _adjust_conflicted_weight(self) -> None:
+    def _adjust_difficulty_weights(self) -> None:
         if len(self.rolling_quality_window) < min(25, self.config.rolling_bad_window):
             return
 
         rolling_bad_ratio = self.rolling_quality_window.count("BAD") / len(self.rolling_quality_window)
+        total_attempts = sum(self.global_quality_counts.values())
+        global_ambiguous_ratio = self._ratio(
+            self.global_quality_counts,
+            total_attempts,
+            "AMBIGUOUS",
+        )
+        low_ambiguity_guard = (
+            total_attempts >= self.config.low_ambiguity_min_cases
+            and (
+                global_ambiguous_ratio < self.config.low_ambiguity_ratio
+                or self._non_malignancy_quality_class_count("AMBIGUOUS")
+                < self.config.low_ambiguity_min_non_malignancy_classes
+            )
+        )
         for label, base_weights in self.base_archetype_weights_by_label.items():
             base_conflicted = float(base_weights.get("conflicted", 0.0))
             min_conflicted = min(base_conflicted, self.config.min_conflicted_weight)
@@ -140,24 +176,55 @@ class QualityMixController:
                     current * self.config.conflicted_recovery_factor,
                 )
 
+            if label not in self.current_overlap_factors:
+                continue
+
+            current_overlap = self.current_overlap_factors[label]
+            if rolling_bad_ratio > self.config.bad_ratio_upper and not low_ambiguity_guard:
+                self.current_overlap_factors[label] = max(
+                    self.config.min_overlap_factor,
+                    current_overlap * self.config.overlap_reduction_factor,
+                )
+            elif (
+                rolling_bad_ratio < self.config.bad_ratio_recovery
+                and current_overlap < 1.0
+            ):
+                self.current_overlap_factors[label] = min(
+                    1.0,
+                    current_overlap * self.config.overlap_recovery_factor,
+                )
+
     def _adjust_malignancy_share_weights(self) -> None:
         total_generated = sum(self.global_quality_counts.values())
         if total_generated < 40:
             return
 
         total_ambiguous = self.global_quality_counts["AMBIGUOUS"]
-        if total_ambiguous <= 0:
-            return
+        total_bad = self.global_quality_counts["BAD"]
+        hm_counts = self.per_class_quality_counts["hematologic_malignancy_suspicion"]
 
-        hm_ambiguous = self.per_class_quality_counts["hematologic_malignancy_suspicion"]["AMBIGUOUS"]
-        hm_share = hm_ambiguous / max(total_ambiguous, 1)
+        if total_ambiguous > 0:
+            hm_share = hm_counts["AMBIGUOUS"] / total_ambiguous
+            if hm_share > 0.40:
+                self.hm_overlap_factor = max(0.10, self.hm_overlap_factor * 0.65)
+                self.hm_conflicted_factor = max(0.15, self.hm_conflicted_factor * 0.75)
+            elif hm_share < 0.32:
+                self.hm_overlap_factor = min(1.0, self.hm_overlap_factor * 1.05)
+                self.hm_conflicted_factor = min(1.0, self.hm_conflicted_factor * 1.05)
 
-        if hm_share > 0.40:
-            self.hm_overlap_factor = max(0.15, self.hm_overlap_factor * 0.80)
-            self.hm_conflicted_factor = max(0.15, self.hm_conflicted_factor * 0.80)
-        elif hm_share < 0.32:
-            self.hm_overlap_factor = min(1.0, self.hm_overlap_factor * 1.10)
-            self.hm_conflicted_factor = min(1.0, self.hm_conflicted_factor * 1.10)
+        if total_bad > 0:
+            hm_bad_share = hm_counts["BAD"] / total_bad
+            if hm_bad_share > 0.45:
+                self.hm_conflicted_factor = max(0.20, self.hm_conflicted_factor * 0.85)
+            elif hm_bad_share < 0.35:
+                self.hm_conflicted_factor = min(1.0, self.hm_conflicted_factor * 1.05)
+
+    def _non_malignancy_quality_class_count(self, quality_label: str) -> int:
+        return sum(
+            self.per_class_quality_counts[label][quality_label] > 0
+            for label in CLASS_PROFILES
+            if label != "hematologic_malignancy_suspicion"
+        )
 
     @staticmethod
     def _ratio(counts: Counter[str], total: int, key: str) -> float:
@@ -228,6 +295,7 @@ class SyntheticDatasetBuilder:
 
             case_index = self._generate_diversity_tail(
                 label=label,
+                target_count=target_count,
                 case_index=case_index,
                 all_rows=all_rows,
                 attempt_counts=attempt_counts,
@@ -279,34 +347,104 @@ class SyntheticDatasetBuilder:
         self,
         *,
         label: str,
+        target_count: int,
         case_index: int,
         all_rows: list[dict[str, object]],
         attempt_counts: Counter[str],
     ) -> int:
         profile = CLASS_PROFILES[label]
         quality_counts = self.quality_controller.per_class_quality_counts[label]
-        if label not in {"bacterial_infection", "viral_infection"}:
+        if label in {"normal", "hematologic_malignancy_suspicion"}:
             return case_index
         if not profile.overlap_neighbors:
             return case_index
-        if quality_counts["BAD"] > 0:
+        target_ambiguous_count = max(1, int(round(target_count * profile.target_ambiguous_ratio)))
+        if quality_counts["AMBIGUOUS"] >= target_ambiguous_count:
             return case_index
 
-        tail_attempts = 0
-        while tail_attempts < 4 and quality_counts["BAD"] == 0:
+        tail_sequences: dict[str, tuple[tuple[str, str], ...]] = {
+            "bacterial_infection": (
+                ("overlap", "variant"),
+                ("overlap", "weak"),
+                ("overlap", "variant"),
+                ("overlap", "weak"),
+                ("borderline", "variant"),
+                ("overlap", "strong"),
+            ),
+            "viral_infection": (
+                ("overlap", "weak"),
+                ("overlap", "variant"),
+                ("conflicted", "weak"),
+                ("overlap", "strong"),
+                ("overlap", "variant"),
+                ("conflicted", "strong"),
+            ),
+            "iron_deficiency_anemia": (
+                ("conflicted", "variant"),
+                ("conflicted", "weak"),
+                ("conflicted", "variant"),
+                ("conflicted", "weak"),
+                ("borderline", "variant"),
+                ("overlap", "variant"),
+            ),
+            "macrocytic_anemia": (
+                ("overlap", "variant"),
+                ("conflicted", "weak"),
+                ("overlap", "weak"),
+                ("conflicted", "variant"),
+                ("overlap", "variant"),
+                ("conflicted", "weak"),
+            ),
+            "allergic_or_parasitic_pattern": (
+                ("overlap", "weak"),
+                ("overlap", "variant"),
+                ("conflicted", "weak"),
+                ("overlap", "strong"),
+                ("overlap", "variant"),
+                ("conflicted", "strong"),
+            ),
+            "thrombocytopenia_pattern": (
+                ("overlap", "variant"),
+                ("conflicted", "variant"),
+                ("overlap", "weak"),
+            ),
+        }
+        sequence = tail_sequences.get(
+            label,
+            (("borderline", "weak"), ("overlap", "variant"), ("conflicted", "weak")),
+        )
+        max_attempts = max(len(sequence), target_ambiguous_count * 2)
+        for attempt_index in range(max_attempts):
+            archetype, signal_strength = sequence[attempt_index % len(sequence)]
             case = self.generator.generate_case(
                 label,
                 case_index,
-                archetype="conflicted",
+                archetype=archetype,
+                signal_strength=signal_strength,
             )
             evaluation = self.evaluator.evaluate_case(case)
             all_rows.append(self.evaluator.serialise_evaluation(evaluation))
             attempt_counts[label] += 1
             self.quality_controller.record(label=label, quality_label=evaluation.quality_label)
             case_index += 1
-            tail_attempts += 1
             quality_counts = self.quality_controller.per_class_quality_counts[label]
+            if quality_counts["AMBIGUOUS"] >= target_ambiguous_count:
+                return case_index
 
+        global_bad_ratio = self.quality_controller._ratio(
+            self.quality_controller.global_quality_counts,
+            sum(self.quality_controller.global_quality_counts.values()),
+            "BAD",
+        )
+        if quality_counts["AMBIGUOUS"] > 0 or quality_counts["BAD"] > 0 or global_bad_ratio >= 0.05:
+            return case_index
+
+        case = self.generator.generate_case(label, case_index, archetype="conflicted")
+        evaluation = self.evaluator.evaluate_case(case)
+        all_rows.append(self.evaluator.serialise_evaluation(evaluation))
+        attempt_counts[label] += 1
+        self.quality_controller.record(label=label, quality_label=evaluation.quality_label)
+        case_index += 1
         return case_index
 
     def export(self, output_dir: str | Path, bundle: DatasetBundle) -> None:
@@ -533,9 +671,28 @@ class SyntheticDatasetBuilder:
         )
         total_all = max(len(all_df), 1)
         total_ambiguous = int((all_df["quality_label"] == "AMBIGUOUS").sum())
+        total_bad = int((all_df["quality_label"] == "BAD").sum())
+        ambiguous_column = (
+            quality_counts["AMBIGUOUS"]
+            if "AMBIGUOUS" in quality_counts.columns
+            else pd.Series(0, index=quality_counts.index)
+        )
+        bad_column = (
+            quality_counts["BAD"]
+            if "BAD" in quality_counts.columns
+            else pd.Series(0, index=quality_counts.index)
+        )
         hm_ambiguous_count = int(
             quality_counts.loc["hematologic_malignancy_suspicion"].get("AMBIGUOUS", 0)
         )
+        hm_bad_count = int(
+            quality_counts.loc["hematologic_malignancy_suspicion"].get("BAD", 0)
+        )
+        ambiguous_class_count = int((ambiguous_column > 0).sum())
+        bad_class_count = int((bad_column > 0).sum())
+        non_malignancy_labels = [
+            label for label in quality_counts.index if label != "hematologic_malignancy_suspicion"
+        ]
 
         return {
             "seed": self.config.seed,
@@ -575,6 +732,15 @@ class SyntheticDatasetBuilder:
                     .sort_index()
                     .to_dict(orient="index")
                 ),
+                "strict_quality_ratios_per_class": {
+                    label: self._quality_ratio_payload(row)
+                    for label, row in (
+                        strict_df.groupby(["intended_label", "quality_label"])
+                        .size()
+                        .unstack(fill_value=0)
+                        .sort_index()
+                    ).iterrows()
+                },
                 "default_per_class": default_df["intended_label"].value_counts().sort_index().to_dict(),
                 "default_quality_per_class": (
                     default_df.groupby(["intended_label", "quality_label"])
@@ -583,8 +749,34 @@ class SyntheticDatasetBuilder:
                     .sort_index()
                     .to_dict(orient="index")
                 ),
+                "default_quality_ratios_per_class": {
+                    label: self._quality_ratio_payload(row)
+                    for label, row in (
+                        default_df.groupby(["intended_label", "quality_label"])
+                        .size()
+                        .unstack(fill_value=0)
+                        .sort_index()
+                    ).iterrows()
+                },
             },
             "hm_ambiguous_share": round(float(hm_ambiguous_count / max(total_ambiguous, 1)), 4),
+            "hm_bad_share": round(float(hm_bad_count / max(total_bad, 1)), 4),
+            "class_contribution_counts": {
+                "ambiguous_classes": ambiguous_class_count,
+                "bad_classes": bad_class_count,
+                "non_malignancy_ambiguous_classes": int(
+                    sum(
+                        int(quality_counts.loc[label].get("AMBIGUOUS", 0)) > 0
+                        for label in non_malignancy_labels
+                    )
+                ),
+                "non_malignancy_bad_classes": int(
+                    sum(
+                        int(quality_counts.loc[label].get("BAD", 0)) > 0
+                        for label in non_malignancy_labels
+                    )
+                ),
+            },
             "split_counts": {
                 "strict": {
                     split_name: int(len(split_frame))
@@ -626,6 +818,18 @@ class SyntheticDatasetBuilder:
         bad_matrix = (
             all_df[all_df["quality_label"] == "BAD"]
             .groupby(["intended_label", "rule_top1_label"])
+            .size()
+            .unstack(fill_value=0)
+            .sort_index()
+        )
+        quality_counts_by_archetype = (
+            all_df.groupby(["archetype", "quality_label"])
+            .size()
+            .unstack(fill_value=0)
+            .sort_index()
+        )
+        per_class_archetype_quality_counts = (
+            all_df.groupby(["intended_label", "archetype", "quality_label"])
             .size()
             .unstack(fill_value=0)
             .sort_index()
@@ -686,6 +890,19 @@ class SyntheticDatasetBuilder:
             "strict_quality_counts": strict_df["quality_label"].value_counts().sort_index().to_dict(),
             "default_quality_counts": default_df["quality_label"].value_counts().sort_index().to_dict(),
             "archetype_counts": all_df["archetype"].value_counts().sort_index().to_dict(),
+            "quality_counts_by_archetype": quality_counts_by_archetype.to_dict(orient="index"),
+            "ambiguous_counts_by_archetype": (
+                all_df[all_df["quality_label"] == "AMBIGUOUS"]["archetype"]
+                .value_counts()
+                .sort_index()
+                .to_dict()
+            ),
+            "bad_counts_by_archetype": (
+                all_df[all_df["quality_label"] == "BAD"]["archetype"]
+                .value_counts()
+                .sort_index()
+                .to_dict()
+            ),
             "overlap_source_counts": all_df["overlap_source"].fillna("none").value_counts().sort_index().to_dict(),
             "ambiguity_matrix": ambiguity_matrix.to_dict(orient="index"),
             "bad_matrix": bad_matrix.to_dict(orient="index"),
@@ -694,6 +911,25 @@ class SyntheticDatasetBuilder:
             ),
             "non_malignancy_bad_class_count": int(
                 sum(int(quality_counts.loc[label].get("BAD", 0)) > 0 for label in non_malignancy_labels)
+            ),
+            "per_class_archetype_quality_counts": {
+                label: {
+                    archetype: {
+                        quality_label: int(count)
+                        for quality_label, count in row.items()
+                    }
+                    for (_, archetype), row in rows.iterrows()
+                }
+                for label, rows in per_class_archetype_quality_counts.groupby(level=0, sort=True)
+            },
+            "per_class_conflicted_bad_counts": (
+                all_df[
+                    (all_df["quality_label"] == "BAD")
+                    & (all_df["archetype"] == "conflicted")
+                ]["intended_label"]
+                .value_counts()
+                .sort_index()
+                .to_dict()
             ),
             "per_class": per_class,
             "columns": {
