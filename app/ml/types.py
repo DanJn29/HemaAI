@@ -30,6 +30,16 @@ class SyntheticCaseEvaluation:
 
 
 @dataclass(slots=True)
+class RuntimeRuleEvaluation:
+    actual_deviation_states: dict[str, str]
+    normalized_scores: dict[str, float]
+    pattern_flags: dict[str, bool]
+    rule_scores: dict[str, float]
+    top1_label: str
+    top3_labels: list[str]
+
+
+@dataclass(slots=True)
 class DatasetBundle:
     all_cases: list[dict[str, object]]
     good_cases: list[dict[str, object]]

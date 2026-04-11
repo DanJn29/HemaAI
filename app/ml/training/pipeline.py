@@ -146,18 +146,28 @@ class TrainingPipeline:
             else:
                 model.fit(X_train, y_train)
 
+            validation_probabilities = model.predict_proba(X_validation)
             probabilities = model.predict_proba(X_test)
             predicted_labels = self._decode_predictions(
                 np.argmax(probabilities, axis=1),
                 label_encoder,
             )
-            metrics = self._evaluate_predictions(
+            validation_metrics = self._evaluate_predictions(
+                y_true=y_validation,
+                y_pred=np.argmax(validation_probabilities, axis=1),
+                probabilities=validation_probabilities,
+                label_encoder=label_encoder,
+            )
+            test_metrics = self._evaluate_predictions(
                 y_true=y_test,
                 y_pred=np.argmax(probabilities, axis=1),
                 probabilities=probabilities,
                 label_encoder=label_encoder,
             )
-            experiment_metrics[model_name] = metrics
+            experiment_metrics[model_name] = {
+                **test_metrics,
+                "validation_metrics": validation_metrics,
+            }
 
             artifact_path = output_subdir / f"{model_name}.joblib"
             joblib.dump(
@@ -198,7 +208,7 @@ class TrainingPipeline:
             self._export_metrics_artifacts(
                 output_subdir=output_subdir,
                 model_name=model_name,
-                metrics=metrics,
+                metrics=test_metrics,
             )
 
             if with_shap and model_name == "catboost":

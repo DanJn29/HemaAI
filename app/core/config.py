@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     min_persisted_score: float = Field(default=1.0)
     max_persisted_non_normal: int = Field(default=5)
     max_returned_hypotheses: int = Field(default=3)
+    ml_best_model_path: str = Field(
+        default="artifacts/models/final_run/best_model.json",
+        validation_alias="ML_BEST_MODEL_PATH",
+    )
     analysis_disclaimer: str = (
         "This system provides ranked hypotheses for educational "
         "decision-support purposes and is not a definitive medical diagnosis."

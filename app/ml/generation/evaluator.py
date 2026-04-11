@@ -13,7 +13,7 @@ from app.services.dto import DiseaseScoreCard, InterpretedValue
 from app.services.pattern_matching_service import PatternMatchingService
 from app.services.reference_range_service import ReferenceRangeService
 from app.services.rule_scoring_service import RuleScoringService
-from app.ml.types import SyntheticCase, SyntheticCaseEvaluation
+from app.ml.types import RuntimeRuleEvaluation, SyntheticCase, SyntheticCaseEvaluation
 
 
 @dataclass(slots=True)
@@ -31,7 +31,12 @@ class RuleEngineContext:
     reference_cache: dict[tuple[int, str, int], ReferenceRange]
 
     @classmethod
-    def from_session(cls, session: Session) -> "RuleEngineContext":
+    def from_session(
+        cls,
+        session: Session,
+        *,
+        preload_reference_cache: bool = True,
+    ) -> "RuleEngineContext":
         catalog_repository = CatalogRepository(session)
         reference_range_service = ReferenceRangeService(session)
         rule_scoring_service = RuleScoringService(session)
@@ -49,14 +54,15 @@ class RuleEngineContext:
         pattern_rules = pattern_matching_service.load_pattern_rules()
 
         reference_cache: dict[tuple[int, str, int], ReferenceRange] = {}
-        for indicator in indicators_by_code.values():
-            for sex in ("male", "female"):
-                for age in range(18, 121):
-                    reference_cache[(indicator.id, sex, age)] = reference_range_service.get_for_indicator(
-                        indicator_id=indicator.id,
-                        sex=sex,
-                        age=age,
-                    )
+        if preload_reference_cache:
+            for indicator in indicators_by_code.values():
+                for sex in ("male", "female"):
+                    for age in range(18, 121):
+                        reference_cache[(indicator.id, sex, age)] = reference_range_service.get_for_indicator(
+                            indicator_id=indicator.id,
+                            sex=sex,
+                            age=age,
+                        )
 
         return cls(
             catalog_repository=catalog_repository,
@@ -80,7 +86,14 @@ class RuleEngineContext:
         age: int,
     ) -> ReferenceRange:
         indicator = self.indicators_by_code[indicator_code]
-        return self.reference_cache[(indicator.id, sex, age)]
+        cache_key = (indicator.id, sex, age)
+        if cache_key not in self.reference_cache:
+            self.reference_cache[cache_key] = self.reference_range_service.get_for_indicator(
+                indicator_id=indicator.id,
+                sex=sex,
+                age=age,
+            )
+        return self.reference_cache[cache_key]
 
 
 class RuleEngineEvaluator:
@@ -89,10 +102,35 @@ class RuleEngineEvaluator:
         self.context = context or RuleEngineContext.from_session(session)
 
     def evaluate_case(self, case: SyntheticCase) -> SyntheticCaseEvaluation:
-        interpreted_values = self._interpret_values(
+        runtime_evaluation = self.evaluate_runtime_case(
             sex=case.sex,
             age=case.age,
             raw_values=case.raw_values,
+        )
+        quality_label = self._quality_label(case.intended_label, runtime_evaluation.top3_labels)
+
+        return SyntheticCaseEvaluation(
+            case=case,
+            actual_deviation_states=runtime_evaluation.actual_deviation_states,
+            normalized_scores=runtime_evaluation.normalized_scores,
+            pattern_flags=runtime_evaluation.pattern_flags,
+            rule_scores=runtime_evaluation.rule_scores,
+            top1_label=runtime_evaluation.top1_label,
+            top3_labels=runtime_evaluation.top3_labels,
+            quality_label=quality_label,
+        )
+
+    def evaluate_runtime_case(
+        self,
+        *,
+        sex: str,
+        age: int,
+        raw_values: dict[str, Decimal],
+    ) -> RuntimeRuleEvaluation:
+        interpreted_values = self._interpret_values(
+            sex=sex,
+            age=age,
+            raw_values=raw_values,
         )
         rules = self.context.rule_scoring_service.load_rules(interpreted_values)
         scorecards = self.context.rule_scoring_service.apply_rules(interpreted_values, rules)
@@ -119,25 +157,49 @@ class RuleEngineEvaluator:
             pattern_rule.code: pattern_rule.code in matched_codes
             for pattern_rule in self.context.pattern_rules
         }
-
         top_labels = self._top_labels(scorecards)
-        top1_label = top_labels[0]
-        quality_label = self._quality_label(case.intended_label, top_labels)
         rule_scores = {
             disease_code: round(scorecards.get(disease.id, DiseaseScoreCard(disease=disease)).total_score, 4)
             for disease_code, disease in self.context.diseases_by_code.items()
         }
-
-        return SyntheticCaseEvaluation(
-            case=case,
+        return RuntimeRuleEvaluation(
             actual_deviation_states=actual_deviation_states,
             normalized_scores=normalized_scores,
             pattern_flags=pattern_flags,
             rule_scores=rule_scores,
-            top1_label=top1_label,
+            top1_label=top_labels[0],
             top3_labels=top_labels[:3],
-            quality_label=quality_label,
         )
+
+    def build_runtime_feature_row(
+        self,
+        *,
+        sex: str,
+        age: int,
+        raw_values: dict[str, Decimal],
+        intended_label: str = "__inference__",
+    ) -> tuple[dict[str, object], RuntimeRuleEvaluation]:
+        evaluation = self.evaluate_runtime_case(
+            sex=sex,
+            age=age,
+            raw_values=raw_values,
+        )
+        row: dict[str, object] = {
+            "intended_label": intended_label,
+            "sex": sex,
+            "age": age,
+            "rule_top1_label": evaluation.top1_label,
+            "rule_top3_labels": json.dumps(evaluation.top3_labels),
+        }
+        for indicator_code, raw_value in raw_values.items():
+            row[indicator_code] = float(raw_value)
+            row[f"deviation_state_{indicator_code}"] = evaluation.actual_deviation_states[indicator_code]
+            row[f"normalized_score_{indicator_code}"] = evaluation.normalized_scores[indicator_code]
+        for pattern_code, matched in evaluation.pattern_flags.items():
+            row[f"pattern_{pattern_code}"] = int(matched)
+        for disease_code, score in evaluation.rule_scores.items():
+            row[f"rule_score_{disease_code}"] = score
+        return row, evaluation
 
     def serialise_evaluation(self, evaluation: SyntheticCaseEvaluation) -> dict[str, object]:
         row: dict[str, object] = {
