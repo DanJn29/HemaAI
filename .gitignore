@@ -2,10 +2,13 @@
 __pycache__/
 .mypy_cache/
 .ruff_cache/
+.vite/
+*.tsbuildinfo
 .coverage
 htmlcov/
 dist/
 build/
+node_modules/
 *.egg-info/
 artifacts/
 .env

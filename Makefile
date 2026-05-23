@@ -1,9 +1,9 @@
 PYTHON ?= python3
 
-.PHONY: up down build migrate seed test logs run generate-dataset train-models
+.PHONY: up down build migrate seed test logs run generate-dataset train-models frontend-build
 
 build:
-	docker-compose build
+	docker-compose build api frontend
 
 up:
 	docker-compose up -d db
@@ -26,6 +26,9 @@ test:
 
 logs:
 	docker-compose logs -f api
+
+frontend-build:
+	docker-compose run --rm frontend npm run build
 
 generate-dataset:
 	docker-compose run --rm api python scripts/generate_dataset.py --seed 42 --samples-per-class 100 --output-dir artifacts/datasets/latest
